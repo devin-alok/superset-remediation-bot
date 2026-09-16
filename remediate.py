@@ -28,6 +28,7 @@ LABEL_BLOCKED = "devin:blocked"
 STARTED_COMMENT = "Devin session started"
 SESSION_TIMEOUT_MINUTES = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "25"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "5"))
 
 
 def build_prompt(repo: str, issue: dict[str, Any]) -> str:
@@ -124,11 +125,20 @@ def check(issue: dict[str, Any], github: GitHubAPI, devin: DevinAPI) -> None:
 
 
 def tick(github: GitHubAPI, devin: DevinAPI) -> None:
-    for issue in github.list_issues(LABEL_IN_PROGRESS):
-        check(issue, github, devin)
-    for issue in github.list_issues(LABEL_TRIGGER):
-        github.relabel(issue["number"], LABEL_TRIGGER, LABEL_IN_PROGRESS)
-        start(issue, 1, github, devin)
+    """One pass over both labels; an error on one issue is logged and does not stop the rest."""
+    in_progress = github.list_issues(LABEL_IN_PROGRESS)
+    for issue in in_progress:
+        try:
+            check(issue, github, devin)
+        except Exception as exc:  # noqa: BLE001
+            print(f"#{issue['number']} check failed: {exc}", file=sys.stderr)
+    free = MAX_CONCURRENT - len(in_progress)
+    for issue in github.list_issues(LABEL_TRIGGER)[: max(free, 0)]:
+        try:
+            github.relabel(issue["number"], LABEL_TRIGGER, LABEL_IN_PROGRESS)
+            start(issue, 1, github, devin)
+        except Exception as exc:  # noqa: BLE001
+            print(f"#{issue['number']} start failed: {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -141,7 +151,7 @@ def main() -> int:
     poll_seconds = int(os.environ.get("POLL_SECONDS", "60"))
     print(
         f"watching {github.repo} for issues labelled {LABEL_TRIGGER} every {poll_seconds}s "
-        f"({MAX_ATTEMPTS} attempts x {SESSION_TIMEOUT_MINUTES} min)"
+        f"({MAX_ATTEMPTS} x {SESSION_TIMEOUT_MINUTES} min per issue, {MAX_CONCURRENT} at once)"
     )
     while True:
         tick(github, devin)
