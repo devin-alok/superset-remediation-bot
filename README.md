@@ -30,8 +30,10 @@ docker build -t remediation-bot .
 docker run --rm --env-file .env remediation-bot
 ```
 
-To remediate a single issue, label it `devin:remediate`. Set `POLL_SECONDS` (default 60)
-to change how often GitHub is checked.
+To remediate a single issue, label it `devin:remediate`. A session still working after
+`SESSION_TIMEOUT_MINUTES` (default 25) is terminated and a fresh one started, up to
+`MAX_ATTEMPTS` (default 3) per issue; after that the issue is labelled `devin:blocked`.
+`POLL_SECONDS` (default 60) is how often GitHub is checked.
 
 `GITHUB_TOKEN` needs *Issues: read and write* on the target repo. `DEVIN_ORG_ID` and
 `DEVIN_API_KEY` come from Devin *Settings → Service Users* (a service user with the
