@@ -1,0 +1,44 @@
+name: Reconciliation sweep
+
+# Safety net: a dropped webhook delivery cannot silently lose work, because the
+# sweep re-checks every labelled issue that has no live session.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: runs
+          key: remediation-state-${{ github.run_id }}
+          restore-keys: remediation-state-
+
+      - run: docker build -t remediation-bot .
+
+      - name: Sweep and report
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          docker run --rm \
+            -e DEVIN_API_KEY -e GITHUB_TOKEN \
+            -e GITHUB_REPO=${{ vars.TARGET_REPO || 'devin-alok/superset' }} \
+            -v "$PWD/runs:/app/runs" \
+            remediation-bot sweep
+
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        if: always()
+        with:
+          name: sweep-report-${{ github.run_id }}
+          path: runs/

@@ -1,0 +1,23 @@
+[
+  {
+    "number": 11,
+    "title": "bug(key-value): tz-aware expires_on written, naive datetime.now() compared on read",
+    "html_url": "https://github.com/devin-alok/superset/issues/11",
+    "labels": [{ "name": "devin:remediate" }, { "name": "bug" }],
+    "body": "## What the code does\n`AcquireDistributedLockCommand` writes `expires_on` as tz-aware UTC while `KeyValueDAO` and `KeyValueEntry.is_expired` compare against naive `datetime.now()`.\n\n## Intended remediation\nNormalise every key-value expiry read/write to tz-aware UTC.\n\n## Verification\n`pytest tests/unit_tests/key_value -q`"
+  },
+  {
+    "number": 13,
+    "title": "bug(gsheets): outbound POST has no timeout and can hang a worker",
+    "html_url": "https://github.com/devin-alok/superset/issues/13",
+    "labels": [{ "name": "devin:remediate" }],
+    "body": "## What the code does\n`GSheetsEngineSpec._do_post` calls `session.post(...)` with no `timeout`.\n\n## Intended remediation\nPass an explicit timeout sourced from config.\n\n## Verification\n`pytest tests/unit_tests/db_engine_specs/test_gsheets.py -q`"
+  },
+  {
+    "number": 14,
+    "title": "chore(webdriver): silent except/pass hides browser cleanup failures",
+    "html_url": "https://github.com/devin-alok/superset/issues/14",
+    "labels": [{ "name": "devin:remediate" }],
+    "body": "## What the code does\n`WebDriverPlaywright._cleanup` swallows every exception.\n\n## Intended remediation\nLog at warning level, keep non-propagating behaviour.\n\n## Verification\n`pytest tests/unit_tests/utils/webdriver_test.py -q`"
+  }
+]
