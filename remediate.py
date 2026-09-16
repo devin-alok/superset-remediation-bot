@@ -13,7 +13,7 @@ import sys
 import time
 from typing import Any
 
-from devin_api import TERMINAL_STATES, Devin, DevinAPI, pr_url_of
+from devin_api import Devin, DevinAPI, outcome_of, pr_url_of
 from github_api import GitHub, GitHubAPI
 
 LABEL_TRIGGER = "devin:remediate"
@@ -48,7 +48,7 @@ pr_url (or null) and a 2-3 sentence summary.
 def result_comment(session: dict[str, Any], session_url: str) -> str:
     output = session.get("structured_output") or {}
     pr_url = pr_url_of(session)
-    status = output.get("status") or session.get("status_enum")
+    status = output.get("status") or session["outcome"]
     lines = [
         f"**Devin session {status}** — {session_url}",
         "",
@@ -93,16 +93,17 @@ class Run:
     def poll(self, timeout_seconds: float) -> dict[str, Any] | None:
         """Return the session once it is terminal (or timed out), else None."""
         session = self.devin.get_session(self.session_id)
-        if session.get("status_enum") in TERMINAL_STATES:
-            return session
-        if time.monotonic() - self.started > timeout_seconds:
-            session["status_enum"] = "timeout"
-            return session
-        return None
+        outcome = outcome_of(session)
+        if outcome is None and time.monotonic() - self.started > timeout_seconds:
+            outcome = "timeout"
+        if outcome is None:
+            return None
+        session["outcome"] = outcome
+        return session
 
     def finish(self, session: dict[str, Any]) -> None:
         self.github.comment(self.number, result_comment(session, self.session_url))
-        print(f"#{self.number} {session.get('status_enum')}  pr {pr_url_of(session) or 'none'}")
+        print(f"#{self.number} {session['outcome']}  pr {pr_url_of(session) or 'none'}")
 
 
 def remediate(
@@ -165,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         github = GitHub(os.environ["GITHUB_REPO"], os.environ["GITHUB_TOKEN"])
-        devin = Devin(os.environ["DEVIN_API_KEY"])
+        devin = Devin(os.environ["DEVIN_ORG_ID"], os.environ["DEVIN_API_KEY"])
     except KeyError as exc:
         print(f"missing environment variable {exc}", file=sys.stderr)
         return 2
