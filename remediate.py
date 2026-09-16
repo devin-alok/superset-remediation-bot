@@ -22,6 +22,7 @@ LABEL_TRIGGER = "devin:remediate"
 LABEL_IN_PROGRESS = "devin:in-progress"
 LABEL_PR_OPEN = "devin:pr-open"
 LABEL_BLOCKED = "devin:blocked"
+STARTED_COMMENT = "Devin session started: "
 
 STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -61,6 +62,7 @@ class GitHubAPI(Protocol):
 
     def get_issue(self, number: int) -> dict[str, Any]: ...
     def list_issues(self, label: str) -> list[dict[str, Any]]: ...
+    def comments(self, number: int) -> list[str]: ...
     def comment(self, number: int, body: str) -> None: ...
     def relabel(self, number: int, old: str, new: str) -> None: ...
 
@@ -90,6 +92,15 @@ class GitHub:
         )
         response.raise_for_status()
         return [issue for issue in response.json() if "pull_request" not in issue]
+
+    def comments(self, number: int) -> list[str]:
+        response = self.http.get(
+            f"{GITHUB_API}/repos/{self.repo}/issues/{number}/comments",
+            params={"per_page": "100"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return [str(comment["body"]) for comment in response.json()]
 
     def comment(self, number: int, body: str) -> None:
         response = self.http.post(
@@ -157,18 +168,33 @@ def result_comment(session: dict[str, Any], session_url: str) -> str:
 class Run:
     """One Devin session working on one issue."""
 
-    def __init__(self, issue: dict[str, Any], github: GitHubAPI, devin: DevinAPI) -> None:
-        self.number: int = issue["number"]
+    def __init__(
+        self, number: int, session_url: str, github: GitHubAPI, devin: DevinAPI
+    ) -> None:
+        self.number, self.session_url = number, session_url
+        self.session_id = "devin-" + session_url.rstrip("/").rsplit("/", 1)[-1]
         self.github, self.devin = github, devin
+        self.started = time.monotonic()
+
+    @classmethod
+    def start(cls, issue: dict[str, Any], github: GitHubAPI, devin: DevinAPI) -> Run:
         created = devin.create_session(
             prompt=build_prompt(github.repo, issue),
-            title=f"Remediate #{self.number}: {issue['title'][:80]}",
+            title=f"Remediate #{issue['number']}: {issue['title'][:80]}",
         )
-        self.session_id: str = created["session_id"]
-        self.session_url: str = created["url"]
-        self.started = time.monotonic()
-        github.comment(self.number, f"Devin session started: {self.session_url}")
-        print(f"#{self.number} session {self.session_url}")
+        github.comment(issue["number"], f"{STARTED_COMMENT}{created['url']}")
+        print(f"#{issue['number']} session {created['url']}")
+        return cls(issue["number"], created["url"], github, devin)
+
+    @classmethod
+    def resume(cls, issue: dict[str, Any], github: GitHubAPI, devin: DevinAPI) -> Run | None:
+        """Rebuild a run from the 'session started' comment left by a previous process."""
+        for body in reversed(github.comments(issue["number"])):
+            if body.startswith(STARTED_COMMENT):
+                url = body[len(STARTED_COMMENT) :].strip()
+                print(f"#{issue['number']} resuming {url}")
+                return cls(issue["number"], url, github, devin)
+        return None
 
     def poll(self, timeout_seconds: float) -> dict[str, Any] | None:
         """Return the session once it is terminal (or timed out), else None."""
@@ -192,7 +218,7 @@ def remediate(
     poll_seconds: float = 30,
     timeout_seconds: float = 5400,
 ) -> dict[str, Any]:
-    run = Run(github.get_issue(issue_number), github, devin)
+    run = Run.start(github.get_issue(issue_number), github, devin)
     while (session := run.poll(timeout_seconds)) is None:
         time.sleep(poll_seconds)
     run.finish(session)
@@ -208,15 +234,23 @@ def watch(
 ) -> None:
     """Start a session for every `devin:remediate` issue; label + comment the outcome.
 
-    With ``once`` the loop returns as soon as no session is in flight.
+    Issues left `devin:in-progress` by a previous process are resumed from their
+    'session started' comment. With ``once`` the loop returns as soon as no session is
+    in flight.
     """
     runs: dict[int, Run] = {}
+    for issue in github.list_issues(LABEL_IN_PROGRESS):
+        run = Run.resume(issue, github, devin)
+        if run is None:
+            github.relabel(issue["number"], LABEL_IN_PROGRESS, LABEL_TRIGGER)
+        else:
+            runs[issue["number"]] = run
     while True:
         for issue in github.list_issues(LABEL_TRIGGER):
             if issue["number"] in runs:
                 continue
             github.relabel(issue["number"], LABEL_TRIGGER, LABEL_IN_PROGRESS)
-            runs[issue["number"]] = Run(issue, github, devin)
+            runs[issue["number"]] = Run.start(issue, github, devin)
         for number, run in list(runs.items()):
             session = run.poll(timeout_seconds)
             if session is None:

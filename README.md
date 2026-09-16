@@ -16,8 +16,8 @@ comment result + PR URL, label → devin:pr-open | devin:blocked
 ```
 
 Everything in this repo is `remediate.py`; the engineering work happens inside the Devin
-session. Labels double as the state machine, so there is no database and restarts are safe
-(an issue already `in-progress` is not picked up twice).
+session. Labels and comments double as the state machine, so there is no database: on restart the
+container resumes every `devin:in-progress` issue from its "Devin session started" comment.
 
 ## Run
 
