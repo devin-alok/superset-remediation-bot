@@ -1,9 +1,9 @@
-"""Remediate one GitHub issue with a Devin session.
+"""Remediate GitHub issues with Devin sessions.
 
-    remediate <issue-number>
-
-Reads the issue, starts a Devin session that fixes it and opens a pull request,
-waits for the session to finish, and comments the result back on the issue.
+remediate                 watch the repo: every issue labelled `devin:remediate`
+                          gets a Devin session (label -> devin:in-progress ->
+                          devin:pr-open | devin:blocked, result commented)
+remediate <issue-number>  remediate one issue and exit
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ import requests
 GITHUB_API = "https://api.github.com"
 DEVIN_API = "https://api.devin.ai/v1"
 TERMINAL_STATES = {"finished", "blocked", "expired"}
+LABEL_TRIGGER = "devin:remediate"
+LABEL_IN_PROGRESS = "devin:in-progress"
+LABEL_PR_OPEN = "devin:pr-open"
+LABEL_BLOCKED = "devin:blocked"
 
 STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -56,7 +60,9 @@ class GitHubAPI(Protocol):
     repo: str
 
     def get_issue(self, number: int) -> dict[str, Any]: ...
+    def list_issues(self, label: str) -> list[dict[str, Any]]: ...
     def comment(self, number: int, body: str) -> None: ...
+    def relabel(self, number: int, old: str, new: str) -> None: ...
 
 
 class DevinAPI(Protocol):
@@ -76,12 +82,29 @@ class GitHub:
         response.raise_for_status()
         return dict(response.json())
 
+    def list_issues(self, label: str) -> list[dict[str, Any]]:
+        response = self.http.get(
+            f"{GITHUB_API}/repos/{self.repo}/issues",
+            params={"labels": label, "state": "open", "per_page": "100"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return [issue for issue in response.json() if "pull_request" not in issue]
+
     def comment(self, number: int, body: str) -> None:
         response = self.http.post(
             f"{GITHUB_API}/repos/{self.repo}/issues/{number}/comments",
             json={"body": body},
             timeout=30,
         )
+        response.raise_for_status()
+
+    def relabel(self, number: int, old: str, new: str) -> None:
+        issue_url = f"{GITHUB_API}/repos/{self.repo}/issues/{number}"
+        response = self.http.delete(f"{issue_url}/labels/{old}", timeout=30)
+        if response.status_code != 404:
+            response.raise_for_status()
+        response = self.http.post(f"{issue_url}/labels", json={"labels": [new]}, timeout=30)
         response.raise_for_status()
 
 
@@ -131,6 +154,37 @@ def result_comment(session: dict[str, Any], session_url: str) -> str:
     return "\n".join(lines)
 
 
+class Run:
+    """One Devin session working on one issue."""
+
+    def __init__(self, issue: dict[str, Any], github: GitHubAPI, devin: DevinAPI) -> None:
+        self.number: int = issue["number"]
+        self.github, self.devin = github, devin
+        created = devin.create_session(
+            prompt=build_prompt(github.repo, issue),
+            title=f"Remediate #{self.number}: {issue['title'][:80]}",
+        )
+        self.session_id: str = created["session_id"]
+        self.session_url: str = created["url"]
+        self.started = time.monotonic()
+        github.comment(self.number, f"Devin session started: {self.session_url}")
+        print(f"#{self.number} session {self.session_url}")
+
+    def poll(self, timeout_seconds: float) -> dict[str, Any] | None:
+        """Return the session once it is terminal (or timed out), else None."""
+        session = self.devin.get_session(self.session_id)
+        if session.get("status_enum") in TERMINAL_STATES:
+            return session
+        if time.monotonic() - self.started > timeout_seconds:
+            session["status_enum"] = "timeout"
+            return session
+        return None
+
+    def finish(self, session: dict[str, Any]) -> None:
+        self.github.comment(self.number, result_comment(session, self.session_url))
+        print(f"#{self.number} {session.get('status_enum')}  pr {pr_url_of(session) or 'none'}")
+
+
 def remediate(
     issue_number: int,
     github: GitHubAPI,
@@ -138,33 +192,47 @@ def remediate(
     poll_seconds: float = 30,
     timeout_seconds: float = 5400,
 ) -> dict[str, Any]:
-    issue = github.get_issue(issue_number)
-    created = devin.create_session(
-        prompt=build_prompt(github.repo, issue),
-        title=f"Remediate #{issue_number}: {issue['title'][:80]}",
-    )
-    session_id, session_url = created["session_id"], created["url"]
-    github.comment(issue_number, f"Devin session started: {session_url}")
-    print(f"session {session_url}")
-
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        session = devin.get_session(session_id)
-        if session.get("status_enum") in TERMINAL_STATES:
-            break
-        if time.monotonic() > deadline:
-            session["status_enum"] = "timeout"
-            break
+    run = Run(github.get_issue(issue_number), github, devin)
+    while (session := run.poll(timeout_seconds)) is None:
         time.sleep(poll_seconds)
-
-    github.comment(issue_number, result_comment(session, session_url))
-    print(f"status {session.get('status_enum')}  pr {pr_url_of(session) or 'none'}")
+    run.finish(session)
     return session
+
+
+def watch(
+    github: GitHubAPI,
+    devin: DevinAPI,
+    poll_seconds: float = 60,
+    timeout_seconds: float = 5400,
+    once: bool = False,
+) -> None:
+    """Start a session for every `devin:remediate` issue; label + comment the outcome.
+
+    With ``once`` the loop returns as soon as no session is in flight.
+    """
+    runs: dict[int, Run] = {}
+    while True:
+        for issue in github.list_issues(LABEL_TRIGGER):
+            if issue["number"] in runs:
+                continue
+            github.relabel(issue["number"], LABEL_TRIGGER, LABEL_IN_PROGRESS)
+            runs[issue["number"]] = Run(issue, github, devin)
+        for number, run in list(runs.items()):
+            session = run.poll(timeout_seconds)
+            if session is None:
+                continue
+            run.finish(session)
+            outcome = LABEL_PR_OPEN if pr_url_of(session) else LABEL_BLOCKED
+            github.relabel(number, LABEL_IN_PROGRESS, outcome)
+            del runs[number]
+        if once and not runs:
+            return
+        time.sleep(poll_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 1 or not args[0].isdigit():
+    if len(args) > 1 or (args and not args[0].isdigit()):
         print(__doc__, file=sys.stderr)
         return 2
     try:
@@ -173,8 +241,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as exc:
         print(f"missing environment variable {exc}", file=sys.stderr)
         return 2
-    session = remediate(int(args[0]), github, devin)
-    return 0 if pr_url_of(session) else 1
+    if args:
+        session = remediate(int(args[0]), github, devin)
+        return 0 if pr_url_of(session) else 1
+    print(f"watching {github.repo} for issues labelled {LABEL_TRIGGER}")
+    watch(github, devin)
+    return 0
 
 
 if __name__ == "__main__":

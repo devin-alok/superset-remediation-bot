@@ -15,15 +15,24 @@ ISSUE = {
 class FakeGitHub:
     repo = "devin-alok/superset"
 
-    def __init__(self) -> None:
+    def __init__(self, labels: list[str] | None = None) -> None:
         self.comments: list[str] = []
+        self.labels = labels or []
 
     def get_issue(self, number: int) -> dict[str, Any]:
         assert number == 14
         return ISSUE
 
+    def list_issues(self, label: str) -> list[dict[str, Any]]:
+        return [ISSUE] if label in self.labels else []
+
     def comment(self, number: int, body: str) -> None:
         self.comments.append(body)
+
+    def relabel(self, number: int, old: str, new: str) -> None:
+        assert number == 14
+        self.labels.remove(old)
+        self.labels.append(new)
 
 
 class FakeDevin:
@@ -91,6 +100,32 @@ def test_remediate_times_out() -> None:
     assert "**Devin session timeout**" in github.comments[1]
 
 
+def test_watch_moves_labelled_issue_through_lifecycle() -> None:
+    github = FakeGitHub(labels=["devin:remediate"])
+    devin = FakeDevin(
+        [
+            {"status_enum": "working"},
+            {"status_enum": "finished", "pull_request": {"url": "https://x/pull/1"}},
+        ]
+    )
+
+    remediate.watch(github, devin, poll_seconds=0, once=True)
+
+    assert github.labels == ["devin:pr-open"]
+    assert github.comments[0] == "Devin session started: https://app.devin.ai/sessions/abc"
+    assert "https://x/pull/1" in github.comments[1]
+    assert len(github.comments) == 2
+
+
+def test_watch_labels_blocked_when_no_pr() -> None:
+    github = FakeGitHub(labels=["devin:remediate"])
+    devin = FakeDevin([{"status_enum": "blocked"}])
+
+    remediate.watch(github, devin, once=True)
+
+    assert github.labels == ["devin:blocked"]
+
+
 def test_main_rejects_bad_arguments() -> None:
-    assert remediate.main([]) == 2
     assert remediate.main(["abc"]) == 2
+    assert remediate.main(["1", "2"]) == 2

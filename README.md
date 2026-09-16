@@ -1,31 +1,37 @@
 # superset-remediation-bot
 
-Fixes a GitHub issue in [devin-alok/superset](https://github.com/devin-alok/superset)
-by handing it to a Devin session.
+Event-driven remediation of issues in [devin-alok/superset](https://github.com/devin-alok/superset):
+label an issue `devin:remediate` and a Devin session fixes it and opens a PR.
 
 ```
-remediate <issue>  ──▶  read issue  ──▶  POST /v1/sessions (Devin API)
-                                              │
-                                     Devin session (Devin's VM)
-                                     clones the repo, fixes, tests, opens a PR
-                                              │
-                        poll until finished ──▶ comment session + PR URL on the issue
+issue labelled devin:remediate
+        │  (container polls GitHub every 60 s)
+        ▼
+label → devin:in-progress, POST /v1/sessions (Devin API), comment session URL
+        │
+   Devin session (Devin's VM): clones the repo, fixes, tests, opens a PR
+        │  (container polls GET /v1/sessions/{id})
+        ▼
+comment result + PR URL, label → devin:pr-open | devin:blocked
 ```
 
 Everything in this repo is `remediate.py`; the engineering work happens inside the Devin
-session.
+session. Labels double as the state machine, so there is no database and restarts are safe
+(an issue already `in-progress` is not picked up twice).
 
 ## Run
 
 ```bash
 cp .env.example .env          # fill in GITHUB_TOKEN and DEVIN_API_KEY
 docker build -t remediation-bot .
-docker run --rm --env-file .env remediation-bot 14
+docker run --rm --env-file .env remediation-bot        # watch mode (the automation)
+docker run --rm --env-file .env remediation-bot 14     # one issue, then exit
 ```
 
-The container prints the session URL, waits for the session to finish (polling every
-30 s, up to 90 min), prints the resulting PR URL, and posts both as comments on the issue.
-Exit code is `0` when a PR was opened, `1` otherwise.
+Sessions are given up to 90 min. In one-issue mode the exit code is `0` when a PR was
+opened, `1` otherwise.
+
+`GITHUB_TOKEN` needs *Issues: read and write* on the target repo.
 
 ## Develop
 
