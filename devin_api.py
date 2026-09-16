@@ -1,4 +1,7 @@
-"""Devin API calls the bot needs: create a session and poll it."""
+"""Devin API (v3) calls the bot needs: create a session and poll it.
+
+https://docs.devin.ai/api-reference/v3/sessions/post-organizations-sessions
+"""
 
 from __future__ import annotations
 
@@ -6,8 +9,7 @@ from typing import Any, Protocol
 
 import requests
 
-DEVIN_API = "https://api.devin.ai/v1"
-TERMINAL_STATES = {"finished", "blocked", "expired"}
+DEVIN_API = "https://api.devin.ai/v3"
 
 STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -26,13 +28,14 @@ class DevinAPI(Protocol):
 
 
 class Devin:
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, org_id: str, api_key: str) -> None:
+        self.sessions_url = f"{DEVIN_API}/organizations/{org_id}/sessions"
         self.http = requests.Session()
         self.http.headers["Authorization"] = f"Bearer {api_key}"
 
     def create_session(self, prompt: str, title: str) -> dict[str, Any]:
         response = self.http.post(
-            f"{DEVIN_API}/sessions",
+            self.sessions_url,
             json={
                 "prompt": prompt,
                 "title": title,
@@ -44,14 +47,31 @@ class Devin:
         return dict(response.json())
 
     def get_session(self, session_id: str) -> dict[str, Any]:
-        response = self.http.get(f"{DEVIN_API}/sessions/{session_id}", timeout=30)
+        response = self.http.get(f"{self.sessions_url}/{session_id}", timeout=30)
         response.raise_for_status()
         return dict(response.json())
 
 
+def outcome_of(session: dict[str, Any]) -> str | None:
+    """'finished' / 'blocked' / 'expired' once the session has stopped working, else None.
+
+    v3 reports `status` (new|claimed|running|exit|error|suspended|resuming) plus
+    `status_detail` (working|waiting_for_user|finished|...); 'blocked' means Devin is
+    waiting on a human.
+    """
+    status, detail = session.get("status"), session.get("status_detail")
+    if detail == "finished" or status == "exit":
+        return "finished"
+    if detail in {"waiting_for_user", "waiting_for_approval"}:
+        return "blocked"
+    if status in {"error", "suspended"}:
+        return "expired"
+    return None
+
+
 def pr_url_of(session: dict[str, Any]) -> str | None:
-    pr = session.get("pull_request")
-    if isinstance(pr, dict) and pr.get("url"):
-        return str(pr["url"])
+    for pr in session.get("pull_requests") or []:
+        if pr.get("pr_url"):
+            return str(pr["pr_url"])
     output = session.get("structured_output") or {}
     return output.get("pr_url")

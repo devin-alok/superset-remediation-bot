@@ -66,10 +66,10 @@ def test_remediate_polls_until_finished_and_comments_pr() -> None:
     github = FakeGitHub()
     devin = FakeDevin(
         [
-            {"status_enum": "working"},
+            {"status": "running", "status_detail": "working"},
             {
-                "status_enum": "finished",
-                "pull_request": {"url": "https://github.com/devin-alok/superset/pull/18"},
+                "status": "exit",
+                "pull_requests": [{"pr_url": "https://github.com/devin-alok/superset/pull/18"}],
                 "structured_output": {"status": "fixed", "pr_url": None, "summary": "Logged."},
             },
         ]
@@ -87,7 +87,7 @@ def test_remediate_polls_until_finished_and_comments_pr() -> None:
 
 def test_remediate_reports_blocked_session_without_pr() -> None:
     github = FakeGitHub()
-    devin = FakeDevin([{"status_enum": "blocked"}])
+    devin = FakeDevin([{"status": "running", "status_detail": "waiting_for_user"}])
 
     session = remediate.remediate(14, github, devin, poll_seconds=0)
 
@@ -98,11 +98,11 @@ def test_remediate_reports_blocked_session_without_pr() -> None:
 
 def test_remediate_times_out() -> None:
     github = FakeGitHub()
-    devin = FakeDevin([{"status_enum": "working"}])
+    devin = FakeDevin([{"status": "running", "status_detail": "working"}])
 
     session = remediate.remediate(14, github, devin, poll_seconds=0, timeout_seconds=0)
 
-    assert session["status_enum"] == "timeout"
+    assert session["outcome"] == "timeout"
     assert "**Devin session timeout**" in github.posted[1]
 
 
@@ -110,8 +110,8 @@ def test_watch_moves_labelled_issue_through_lifecycle() -> None:
     github = FakeGitHub(labels=["devin:remediate"])
     devin = FakeDevin(
         [
-            {"status_enum": "working"},
-            {"status_enum": "finished", "pull_request": {"url": "https://x/pull/1"}},
+            {"status": "running", "status_detail": "working"},
+            {"status": "exit", "pull_requests": [{"pr_url": "https://x/pull/1"}]},
         ]
     )
 
@@ -125,7 +125,7 @@ def test_watch_moves_labelled_issue_through_lifecycle() -> None:
 
 def test_watch_labels_blocked_when_no_pr() -> None:
     github = FakeGitHub(labels=["devin:remediate"])
-    devin = FakeDevin([{"status_enum": "blocked"}])
+    devin = FakeDevin([{"status": "running", "status_detail": "waiting_for_user"}])
 
     remediate.watch(github, devin, once=True)
 
@@ -135,9 +135,7 @@ def test_watch_labels_blocked_when_no_pr() -> None:
 def test_watch_resumes_in_progress_issue_after_restart() -> None:
     github = FakeGitHub(labels=["devin:in-progress"])
     github.posted = ["Devin session started: https://app.devin.ai/sessions/old"]
-    devin = FakeDevin(
-        [{"status_enum": "finished", "pull_request": {"url": "https://x/pull/2"}}]
-    )
+    devin = FakeDevin([{"status": "exit", "pull_requests": [{"pr_url": "https://x/pull/2"}]}])
 
     remediate.watch(github, devin, poll_seconds=0, once=True)
 
@@ -149,7 +147,7 @@ def test_watch_resumes_in_progress_issue_after_restart() -> None:
 
 def test_watch_requeues_in_progress_issue_without_session_comment() -> None:
     github = FakeGitHub(labels=["devin:in-progress"])
-    devin = FakeDevin([{"status_enum": "finished"}])
+    devin = FakeDevin([{"status": "exit"}])
 
     remediate.watch(github, devin, poll_seconds=0, once=True)
 
