@@ -16,21 +16,22 @@ comment result + PR URL, label → devin:pr-open | devin:blocked
 ```
 
 The code is three small modules — `github_api.py` (issues, comments, labels), `devin_api.py`
-(create/poll sessions) and `remediate.py` (prompt, watch loop, CLI); the engineering work
-happens inside the Devin session. Labels and comments double as the state machine, so there is no database: on restart the
-container resumes every `devin:in-progress` issue from its "Devin session started" comment.
+(create/poll sessions) and `remediate.py` (prompt + one `tick` run every `POLL_SECONDS`);
+the engineering work happens inside the Devin session. A tick is stateless: it starts a
+session for every `devin:remediate` issue, then checks every `devin:in-progress` issue by
+reading its "Devin session started" comment. Labels and comments are the whole state machine,
+so there is no database and the container can be restarted at any time.
 
 ## Run
 
 ```bash
 cp .env.example .env          # fill in GITHUB_TOKEN, DEVIN_ORG_ID, DEVIN_API_KEY
 docker build -t remediation-bot .
-docker run --rm --env-file .env remediation-bot        # watch mode (the automation)
-docker run --rm --env-file .env remediation-bot 14     # one issue, then exit
+docker run --rm --env-file .env remediation-bot
 ```
 
-Sessions are given up to 90 min. In one-issue mode the exit code is `0` when a PR was
-opened, `1` otherwise.
+To remediate a single issue, label it `devin:remediate`. Set `POLL_SECONDS` (default 60)
+to change how often GitHub is checked.
 
 `GITHUB_TOKEN` needs *Issues: read and write* on the target repo. `DEVIN_ORG_ID` and
 `DEVIN_API_KEY` come from Devin *Settings → Service Users* (a service user with the
