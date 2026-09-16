@@ -143,7 +143,7 @@ def tick(github: GitHubAPI, devin: DevinAPI) -> None:
             print(f"#{issue['number']} start failed: {exc}", file=sys.stderr)
     path, data = report.write(github)
     print(report.metrics_line(data))
-    print(f"report written to file://{path}")
+    print(f"report written to {report.url(path)}")
 
 
 def main() -> int:

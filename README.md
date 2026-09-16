@@ -30,7 +30,7 @@ git clone https://github.com/devin-alok/superset-remediation-bot.git
 cd superset-remediation-bot
 cp .env.example .env          # fill in GITHUB_TOKEN, DEVIN_ORG_ID, DEVIN_API_KEY
 docker build -t remediation-bot .
-docker run --rm --env-file .env -v "$PWD/reports:/reports" remediation-bot   # Ctrl-C to stop; run only one instance at a time
+docker run --rm --env-file .env -v "$PWD/reports:/reports" -e HOST_REPORT_DIR="$PWD/reports" remediation-bot   # Ctrl-C to stop; run only one instance at a time
 ```
 
 The log prints one line per event (`#26 attempt 1 session <url>`, `#26 finished  pr <url>`);
@@ -54,8 +54,11 @@ Every tick ends with one JSON metrics line and regenerates a self-contained HTML
 
 ```
 {"event": "tick", "queued": 0, "in progress": 1, "pr open": 3, "blocked": 1, "median_minutes": 14.0}
-report written to file:///reports/report.html
+report written to file:///Users/you/superset-remediation-bot/reports/report.html
 ```
+
+`HOST_REPORT_DIR` is the host directory mounted at `/reports`; when set, the logged URL points
+at the host file so it can be opened straight from the terminal (Cmd/Ctrl-click).
 
 The report shows queued / in-progress / successful / failed counts, success rate, median,
 fastest and slowest time-to-PR, and a per-issue table. Everything is derived from the
