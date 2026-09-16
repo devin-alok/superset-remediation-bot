@@ -163,6 +163,7 @@ def render(data: dict[str, Any]) -> str:
 def write(github: GitHubAPI, path: str | None = None) -> tuple[str, dict[str, Any]]:
     path = path or os.environ.get("REPORT_PATH", "report.html")
     data = collect(github)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(render(data))
     return os.path.abspath(path), data
