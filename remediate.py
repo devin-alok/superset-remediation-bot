@@ -11,28 +11,16 @@ from __future__ import annotations
 import os
 import sys
 import time
-from typing import Any, Protocol
+from typing import Any
 
-import requests
+from devin_api import TERMINAL_STATES, Devin, DevinAPI, pr_url_of
+from github_api import GitHub, GitHubAPI
 
-GITHUB_API = "https://api.github.com"
-DEVIN_API = "https://api.devin.ai/v1"
-TERMINAL_STATES = {"finished", "blocked", "expired"}
 LABEL_TRIGGER = "devin:remediate"
 LABEL_IN_PROGRESS = "devin:in-progress"
 LABEL_PR_OPEN = "devin:pr-open"
 LABEL_BLOCKED = "devin:blocked"
 STARTED_COMMENT = "Devin session started: "
-
-STRUCTURED_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "status": {"type": "string", "enum": ["fixed", "blocked"]},
-        "pr_url": {"type": ["string", "null"]},
-        "summary": {"type": "string"},
-    },
-    "required": ["status", "summary"],
-}
 
 
 def build_prompt(repo: str, issue: dict[str, Any]) -> str:
@@ -55,100 +43,6 @@ Fix the following issue in the GitHub repository `{repo}`.
 Report the result via structured output: status ("fixed" or "blocked"),
 pr_url (or null) and a 2-3 sentence summary.
 """
-
-
-class GitHubAPI(Protocol):
-    repo: str
-
-    def get_issue(self, number: int) -> dict[str, Any]: ...
-    def list_issues(self, label: str) -> list[dict[str, Any]]: ...
-    def comments(self, number: int) -> list[str]: ...
-    def comment(self, number: int, body: str) -> None: ...
-    def relabel(self, number: int, old: str, new: str) -> None: ...
-
-
-class DevinAPI(Protocol):
-    def create_session(self, prompt: str, title: str) -> dict[str, Any]: ...
-    def get_session(self, session_id: str) -> dict[str, Any]: ...
-
-
-class GitHub:
-    def __init__(self, repo: str, token: str) -> None:
-        self.repo = repo
-        self.http = requests.Session()
-        self.http.headers["Authorization"] = f"Bearer {token}"
-        self.http.headers["Accept"] = "application/vnd.github+json"
-
-    def get_issue(self, number: int) -> dict[str, Any]:
-        response = self.http.get(f"{GITHUB_API}/repos/{self.repo}/issues/{number}", timeout=30)
-        response.raise_for_status()
-        return dict(response.json())
-
-    def list_issues(self, label: str) -> list[dict[str, Any]]:
-        response = self.http.get(
-            f"{GITHUB_API}/repos/{self.repo}/issues",
-            params={"labels": label, "state": "open", "per_page": "100"},
-            timeout=30,
-        )
-        response.raise_for_status()
-        return [issue for issue in response.json() if "pull_request" not in issue]
-
-    def comments(self, number: int) -> list[str]:
-        response = self.http.get(
-            f"{GITHUB_API}/repos/{self.repo}/issues/{number}/comments",
-            params={"per_page": "100"},
-            timeout=30,
-        )
-        response.raise_for_status()
-        return [str(comment["body"]) for comment in response.json()]
-
-    def comment(self, number: int, body: str) -> None:
-        response = self.http.post(
-            f"{GITHUB_API}/repos/{self.repo}/issues/{number}/comments",
-            json={"body": body},
-            timeout=30,
-        )
-        response.raise_for_status()
-
-    def relabel(self, number: int, old: str, new: str) -> None:
-        issue_url = f"{GITHUB_API}/repos/{self.repo}/issues/{number}"
-        response = self.http.delete(f"{issue_url}/labels/{old}", timeout=30)
-        if response.status_code != 404:
-            response.raise_for_status()
-        response = self.http.post(f"{issue_url}/labels", json={"labels": [new]}, timeout=30)
-        response.raise_for_status()
-
-
-class Devin:
-    def __init__(self, api_key: str) -> None:
-        self.http = requests.Session()
-        self.http.headers["Authorization"] = f"Bearer {api_key}"
-
-    def create_session(self, prompt: str, title: str) -> dict[str, Any]:
-        response = self.http.post(
-            f"{DEVIN_API}/sessions",
-            json={
-                "prompt": prompt,
-                "title": title,
-                "structured_output_schema": STRUCTURED_OUTPUT_SCHEMA,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        return dict(response.json())
-
-    def get_session(self, session_id: str) -> dict[str, Any]:
-        response = self.http.get(f"{DEVIN_API}/sessions/{session_id}", timeout=30)
-        response.raise_for_status()
-        return dict(response.json())
-
-
-def pr_url_of(session: dict[str, Any]) -> str | None:
-    pr = session.get("pull_request")
-    if isinstance(pr, dict) and pr.get("url"):
-        return str(pr["url"])
-    output = session.get("structured_output") or {}
-    return output.get("pr_url")
 
 
 def result_comment(session: dict[str, Any], session_url: str) -> str:

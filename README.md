@@ -15,8 +15,9 @@ label → devin:in-progress, POST /v1/sessions (Devin API), comment session URL
 comment result + PR URL, label → devin:pr-open | devin:blocked
 ```
 
-Everything in this repo is `remediate.py`; the engineering work happens inside the Devin
-session. Labels and comments double as the state machine, so there is no database: on restart the
+The code is three small modules — `github_api.py` (issues, comments, labels), `devin_api.py`
+(create/poll sessions) and `remediate.py` (prompt, watch loop, CLI); the engineering work
+happens inside the Devin session. Labels and comments double as the state machine, so there is no database: on restart the
 container resumes every `devin:in-progress` issue from its "Devin session started" comment.
 
 ## Run
@@ -37,5 +38,5 @@ opened, `1` otherwise.
 
 ```bash
 pip install -e ".[dev]"
-ruff check . && mypy remediate.py && pytest -q
+ruff check . && mypy . && pytest -q
 ```

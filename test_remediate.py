@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import devin_api
 import remediate
 
 ISSUE = {
@@ -77,7 +78,7 @@ def test_remediate_polls_until_finished_and_comments_pr() -> None:
     session = remediate.remediate(14, github, devin, poll_seconds=0)
 
     assert devin.created is not None and "Issue #14" in devin.created["prompt"]
-    assert remediate.pr_url_of(session) == "https://github.com/devin-alok/superset/pull/18"
+    assert devin_api.pr_url_of(session) == "https://github.com/devin-alok/superset/pull/18"
     assert github.posted[0] == "Devin session started: https://app.devin.ai/sessions/abc"
     assert "**Devin session fixed**" in github.posted[1]
     assert "https://github.com/devin-alok/superset/pull/18" in github.posted[1]
@@ -90,7 +91,7 @@ def test_remediate_reports_blocked_session_without_pr() -> None:
 
     session = remediate.remediate(14, github, devin, poll_seconds=0)
 
-    assert remediate.pr_url_of(session) is None
+    assert devin_api.pr_url_of(session) is None
     assert "**Devin session blocked**" in github.posted[1]
     assert "Pull request: _none_" in github.posted[1]
 
