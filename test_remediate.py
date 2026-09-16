@@ -159,3 +159,32 @@ def test_started_sessions_reads_all_attempts_in_order() -> None:
     ]
     assert remediate.started_sessions(comments) == ["https://x/1", "https://x/2"]
     assert remediate.started_sessions(["unrelated"]) == []
+
+
+def test_tick_respects_max_concurrent(monkeypatch: Any) -> None:
+    monkeypatch.setattr(remediate, "MAX_CONCURRENT", 0)
+    github, devin = FakeGitHub("devin:remediate"), FakeDevin()
+
+    remediate.tick(github, devin)
+
+    assert devin.created is None
+    assert github.label == "devin:remediate"
+
+
+def test_tick_continues_after_one_issue_fails(capsys: Any) -> None:
+    class BrokenGitHub(FakeGitHub):
+        def list_issues(self, label: str) -> list[dict[str, Any]]:
+            return [dict(ISSUE, number=99), ISSUE] if label == self.label else []
+
+        def relabel(self, number: int, old: str, new: str) -> None:
+            if number == 99:
+                raise RuntimeError("boom")
+            super().relabel(number, old, new)
+
+    github, devin = BrokenGitHub("devin:remediate"), FakeDevin()
+
+    remediate.tick(github, devin)
+
+    assert "#99 start failed: boom" in capsys.readouterr().err
+    assert devin.created is not None
+    assert github.label == "devin:in-progress"

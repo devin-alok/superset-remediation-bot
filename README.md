@@ -33,7 +33,9 @@ docker run --rm --env-file .env remediation-bot
 To remediate a single issue, label it `devin:remediate`. A session still working after
 `SESSION_TIMEOUT_MINUTES` (default 25) is terminated and a fresh one started, up to
 `MAX_ATTEMPTS` (default 3) per issue; after that the issue is labelled `devin:blocked`.
-`POLL_SECONDS` (default 60) is how often GitHub is checked.
+At most `MAX_CONCURRENT` (default 5) issues are in flight at once; the rest wait with their
+`devin:remediate` label. `POLL_SECONDS` (default 60) is how often GitHub is checked. An API
+error on one issue is logged and the tick moves on to the next issue.
 
 `GITHUB_TOKEN` needs *Issues: read and write* on the target repo. `DEVIN_ORG_ID` and
 `DEVIN_API_KEY` come from Devin *Settings → Service Users* (a service user with the
