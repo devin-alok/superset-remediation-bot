@@ -12,7 +12,6 @@ GITHUB_API = "https://api.github.com"
 class GitHubAPI(Protocol):
     repo: str
 
-    def get_issue(self, number: int) -> dict[str, Any]: ...
     def list_issues(self, label: str) -> list[dict[str, Any]]: ...
     def comments(self, number: int) -> list[str]: ...
     def comment(self, number: int, body: str) -> None: ...
@@ -25,11 +24,6 @@ class GitHub:
         self.http = requests.Session()
         self.http.headers["Authorization"] = f"Bearer {token}"
         self.http.headers["Accept"] = "application/vnd.github+json"
-
-    def get_issue(self, number: int) -> dict[str, Any]:
-        response = self.http.get(f"{GITHUB_API}/repos/{self.repo}/issues/{number}", timeout=30)
-        response.raise_for_status()
-        return dict(response.json())
 
     def list_issues(self, label: str) -> list[dict[str, Any]]:
         response = self.http.get(

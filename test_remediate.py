@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import devin_api
 import remediate
 
 ISSUE = {
@@ -11,21 +10,18 @@ ISSUE = {
     "body": "Log the exception.",
     "html_url": "https://github.com/devin-alok/superset/issues/14",
 }
+STARTED = "Devin session started: https://app.devin.ai/sessions/abc"
 
 
 class FakeGitHub:
     repo = "devin-alok/superset"
 
-    def __init__(self, labels: list[str] | None = None) -> None:
-        self.posted: list[str] = []
-        self.labels = labels or []
-
-    def get_issue(self, number: int) -> dict[str, Any]:
-        assert number == 14
-        return ISSUE
+    def __init__(self, label: str, posted: list[str] | None = None) -> None:
+        self.label = label
+        self.posted = posted or []
 
     def list_issues(self, label: str) -> list[dict[str, Any]]:
-        return [ISSUE] if label in self.labels else []
+        return [ISSUE] if label == self.label else []
 
     def comments(self, number: int) -> list[str]:
         return self.posted
@@ -34,14 +30,13 @@ class FakeGitHub:
         self.posted.append(body)
 
     def relabel(self, number: int, old: str, new: str) -> None:
-        assert number == 14
-        self.labels.remove(old)
-        self.labels.append(new)
+        assert (number, old) == (14, self.label)
+        self.label = new
 
 
 class FakeDevin:
-    def __init__(self, states: list[dict[str, Any]]) -> None:
-        self.states = states
+    def __init__(self, session: dict[str, Any] | None = None) -> None:
+        self.session = session
         self.created: dict[str, Any] | None = None
         self.polled: list[str] = []
 
@@ -51,7 +46,8 @@ class FakeDevin:
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         self.polled.append(session_id)
-        return self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        assert self.session is not None
+        return self.session
 
 
 def test_build_prompt_contains_issue_and_pr_contract() -> None:
@@ -62,99 +58,73 @@ def test_build_prompt_contains_issue_and_pr_contract() -> None:
     assert "devin/issue-14-" in prompt
 
 
-def test_remediate_polls_until_finished_and_comments_pr() -> None:
-    github = FakeGitHub()
-    devin = FakeDevin(
-        [
-            {"status": "running", "status_detail": "working"},
-            {
-                "status": "exit",
-                "pull_requests": [{"pr_url": "https://github.com/devin-alok/superset/pull/18"}],
-                "structured_output": {"status": "fixed", "pr_url": None, "summary": "Logged."},
-            },
-        ]
-    )
+def test_tick_starts_session_for_labelled_issue() -> None:
+    github, devin = FakeGitHub("devin:remediate"), FakeDevin()
 
-    session = remediate.remediate(14, github, devin, poll_seconds=0)
+    remediate.tick(github, devin)
 
     assert devin.created is not None and "Issue #14" in devin.created["prompt"]
-    assert devin_api.pr_url_of(session) == "https://github.com/devin-alok/superset/pull/18"
-    assert github.posted[0] == "Devin session started: https://app.devin.ai/sessions/abc"
+    assert github.label == "devin:in-progress"
+    assert github.posted == [STARTED]
+
+
+def test_tick_leaves_running_session_alone() -> None:
+    github = FakeGitHub("devin:in-progress", [STARTED])
+    devin = FakeDevin({"status": "running", "status_detail": "working"})
+
+    remediate.tick(github, devin)
+
+    assert devin.polled == ["devin-abc"]
+    assert devin.created is None
+    assert github.label == "devin:in-progress"
+    assert github.posted == [STARTED]
+
+
+def test_tick_comments_pr_and_labels_pr_open_when_finished() -> None:
+    github = FakeGitHub("devin:in-progress", [STARTED])
+    devin = FakeDevin(
+        {
+            "status": "exit",
+            "pull_requests": [{"pr_url": "https://github.com/devin-alok/superset/pull/18"}],
+            "structured_output": {"status": "fixed", "summary": "Logged."},
+        }
+    )
+
+    remediate.tick(github, devin)
+
+    assert github.label == "devin:pr-open"
     assert "**Devin session fixed**" in github.posted[1]
     assert "https://github.com/devin-alok/superset/pull/18" in github.posted[1]
     assert "Logged." in github.posted[1]
 
 
-def test_remediate_reports_blocked_session_without_pr() -> None:
-    github = FakeGitHub()
-    devin = FakeDevin([{"status": "running", "status_detail": "waiting_for_user"}])
+def test_tick_labels_blocked_when_no_pr() -> None:
+    github = FakeGitHub("devin:in-progress", [STARTED])
+    devin = FakeDevin({"status": "running", "status_detail": "waiting_for_user"})
 
-    session = remediate.remediate(14, github, devin, poll_seconds=0)
+    remediate.tick(github, devin)
 
-    assert devin_api.pr_url_of(session) is None
+    assert github.label == "devin:blocked"
     assert "**Devin session blocked**" in github.posted[1]
     assert "Pull request: _none_" in github.posted[1]
 
 
-def test_remediate_times_out() -> None:
-    github = FakeGitHub()
-    devin = FakeDevin([{"status": "running", "status_detail": "working"}])
+def test_tick_requeues_in_progress_issue_without_session_comment() -> None:
+    github, devin = FakeGitHub("devin:in-progress"), FakeDevin()
 
-    session = remediate.remediate(14, github, devin, poll_seconds=0, timeout_seconds=0)
+    remediate.tick(github, devin)
 
-    assert session["outcome"] == "timeout"
-    assert "**Devin session timeout**" in github.posted[1]
-
-
-def test_watch_moves_labelled_issue_through_lifecycle() -> None:
-    github = FakeGitHub(labels=["devin:remediate"])
-    devin = FakeDevin(
-        [
-            {"status": "running", "status_detail": "working"},
-            {"status": "exit", "pull_requests": [{"pr_url": "https://x/pull/1"}]},
-        ]
-    )
-
-    remediate.watch(github, devin, poll_seconds=0, once=True)
-
-    assert github.labels == ["devin:pr-open"]
-    assert github.posted[0] == "Devin session started: https://app.devin.ai/sessions/abc"
-    assert "https://x/pull/1" in github.posted[1]
-    assert len(github.posted) == 2
+    assert devin.polled == []
+    assert devin.created is not None  # requeued and started fresh in the same tick
+    assert github.label == "devin:in-progress"
+    assert github.posted == [STARTED]
 
 
-def test_watch_labels_blocked_when_no_pr() -> None:
-    github = FakeGitHub(labels=["devin:remediate"])
-    devin = FakeDevin([{"status": "running", "status_detail": "waiting_for_user"}])
-
-    remediate.watch(github, devin, once=True)
-
-    assert github.labels == ["devin:blocked"]
-
-
-def test_watch_resumes_in_progress_issue_after_restart() -> None:
-    github = FakeGitHub(labels=["devin:in-progress"])
-    github.posted = ["Devin session started: https://app.devin.ai/sessions/old"]
-    devin = FakeDevin([{"status": "exit", "pull_requests": [{"pr_url": "https://x/pull/2"}]}])
-
-    remediate.watch(github, devin, poll_seconds=0, once=True)
-
-    assert devin.created is None  # no new session
-    assert devin.polled == ["devin-old"]
-    assert github.labels == ["devin:pr-open"]
-    assert "https://x/pull/2" in github.posted[1]
-
-
-def test_watch_requeues_in_progress_issue_without_session_comment() -> None:
-    github = FakeGitHub(labels=["devin:in-progress"])
-    devin = FakeDevin([{"status": "exit"}])
-
-    remediate.watch(github, devin, poll_seconds=0, once=True)
-
-    assert devin.created is not None  # picked up again via devin:remediate
-    assert github.labels == ["devin:blocked"]
-
-
-def test_main_rejects_bad_arguments() -> None:
-    assert remediate.main(["abc"]) == 2
-    assert remediate.main(["1", "2"]) == 2
+def test_session_url_of_uses_latest_started_comment() -> None:
+    comments = [
+        "Devin session started: https://x/1",
+        "unrelated",
+        "Devin session started: https://x/2 ",
+    ]
+    assert remediate.session_url_of(comments) == "https://x/2"
+    assert remediate.session_url_of(["unrelated"]) is None
