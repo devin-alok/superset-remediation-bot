@@ -4,7 +4,9 @@ Every POLL_SECONDS the bot runs one stateless `tick`:
 
   devin:remediate    -> create a Devin session, comment its URL, label devin:in-progress
   devin:in-progress  -> poll the session from that comment; when it is done, comment
-                        the result and label devin:pr-open | devin:blocked
+                        the result and label devin:pr-open | devin:blocked. A session
+                        still working after SESSION_TIMEOUT_MINUTES is terminated and
+                        retried, up to MAX_ATTEMPTS sessions per issue.
 
 Labels and comments are the only state, so the process can be restarted at any time.
 After each tick the pipeline metrics are logged and `report.html` is regenerated.
@@ -25,7 +27,10 @@ LABEL_TRIGGER = "devin:remediate"
 LABEL_IN_PROGRESS = "devin:in-progress"
 LABEL_PR_OPEN = "devin:pr-open"
 LABEL_BLOCKED = "devin:blocked"
-STARTED_COMMENT = "Devin session started: "
+STARTED_COMMENT = "Devin session started"
+SESSION_TIMEOUT_MINUTES = int(os.environ.get("SESSION_TIMEOUT_MINUTES", "25"))
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "5"))
 
 
 def build_prompt(repo: str, issue: dict[str, Any]) -> str:
@@ -62,48 +67,80 @@ def result_comment(session: dict[str, Any], outcome: str, session_url: str) -> s
     return "\n".join(lines)
 
 
-def session_url_of(comments: list[str]) -> str | None:
-    """The URL from the latest 'session started' comment the bot left on an issue."""
-    for body in reversed(comments):
-        if body.startswith(STARTED_COMMENT):
-            return body[len(STARTED_COMMENT) :].strip()
-    return None
+def started_sessions(comments: list[str]) -> list[str]:
+    """Session URLs from the bot's 'Devin session started (attempt n): <url>' comments."""
+    return [body.rsplit(" ", 1)[-1] for body in comments if body.startswith(STARTED_COMMENT)]
 
 
-def start(issue: dict[str, Any], github: GitHubAPI, devin: DevinAPI) -> None:
+def session_id_of(url: str) -> str:
+    return "devin-" + url.rstrip("/").rsplit("/", 1)[-1]
+
+
+def start(issue: dict[str, Any], attempt: int, github: GitHubAPI, devin: DevinAPI) -> None:
     number = issue["number"]
-    github.relabel(number, LABEL_TRIGGER, LABEL_IN_PROGRESS)
     created = devin.create_session(
         prompt=build_prompt(github.repo, issue),
         title=f"Remediate #{number}: {issue['title'][:80]}",
     )
-    github.comment(number, f"{STARTED_COMMENT}{created['url']}")
-    print(f"#{number} session {created['url']}")
+    github.comment(
+        number, f"{STARTED_COMMENT} (attempt {attempt}/{MAX_ATTEMPTS}): {created['url']}"
+    )
+    print(f"#{number} attempt {attempt} session {created['url']}")
+
+
+def finish(number: int, label: str, body: str, github: GitHubAPI) -> None:
+    github.comment(number, body)
+    github.relabel(number, LABEL_IN_PROGRESS, label)
 
 
 def check(issue: dict[str, Any], github: GitHubAPI, devin: DevinAPI) -> None:
     number = issue["number"]
-    url = session_url_of(github.comments(number))
-    if url is None:
+    urls = started_sessions(github.comments(number))
+    if not urls:
         print(f"#{number} no session comment, requeueing")
         github.relabel(number, LABEL_IN_PROGRESS, LABEL_TRIGGER)
         return
-    session = devin.get_session("devin-" + url.rstrip("/").rsplit("/", 1)[-1])
+    url, attempt = urls[-1], len(urls)
+    session = devin.get_session(session_id_of(url))
     outcome = outcome_of(session)
-    if outcome is None:
+    if outcome is not None:
+        finish(
+            number,
+            LABEL_PR_OPEN if pr_url_of(session) else LABEL_BLOCKED,
+            result_comment(session, outcome, url),
+            github,
+        )
+        print(f"#{number} {outcome}  pr {pr_url_of(session) or 'none'}")
         return
-    github.comment(number, result_comment(session, outcome, url))
-    github.relabel(
-        number, LABEL_IN_PROGRESS, LABEL_PR_OPEN if pr_url_of(session) else LABEL_BLOCKED
+    if time.time() - session["created_at"] < SESSION_TIMEOUT_MINUTES * 60:
+        return
+    devin.terminate_session(session_id_of(url))
+    print(f"#{number} attempt {attempt} timed out after {SESSION_TIMEOUT_MINUTES} min")
+    if attempt < MAX_ATTEMPTS:
+        start(issue, attempt + 1, github, devin)
+        return
+    gave_up = (
+        f"**Devin session timeout** — gave up after {MAX_ATTEMPTS} attempts of "
+        f"{SESSION_TIMEOUT_MINUTES} min; last session {url}"
     )
-    print(f"#{number} {outcome}  pr {pr_url_of(session) or 'none'}")
+    finish(number, LABEL_BLOCKED, gave_up, github)
 
 
 def tick(github: GitHubAPI, devin: DevinAPI) -> None:
-    for issue in github.list_issues(LABEL_IN_PROGRESS):
-        check(issue, github, devin)
-    for issue in github.list_issues(LABEL_TRIGGER):
-        start(issue, github, devin)
+    """One pass over both labels; an error on one issue is logged and does not stop the rest."""
+    in_progress = github.list_issues(LABEL_IN_PROGRESS)
+    for issue in in_progress:
+        try:
+            check(issue, github, devin)
+        except Exception as exc:  # noqa: BLE001
+            print(f"#{issue['number']} check failed: {exc}", file=sys.stderr)
+    free = MAX_CONCURRENT - len(in_progress)
+    for issue in github.list_issues(LABEL_TRIGGER)[: max(free, 0)]:
+        try:
+            github.relabel(issue["number"], LABEL_TRIGGER, LABEL_IN_PROGRESS)
+            start(issue, 1, github, devin)
+        except Exception as exc:  # noqa: BLE001
+            print(f"#{issue['number']} start failed: {exc}", file=sys.stderr)
     path, data = report.write(github)
     print(report.metrics_line(data))
     print(f"report written to file://{path}")
@@ -117,7 +154,10 @@ def main() -> int:
         print(f"missing environment variable {exc}", file=sys.stderr)
         return 2
     poll_seconds = int(os.environ.get("POLL_SECONDS", "60"))
-    print(f"watching {github.repo} for issues labelled {LABEL_TRIGGER} every {poll_seconds}s")
+    print(
+        f"watching {github.repo} for issues labelled {LABEL_TRIGGER} every {poll_seconds}s "
+        f"({MAX_ATTEMPTS} x {SESSION_TIMEOUT_MINUTES} min per issue, {MAX_CONCURRENT} at once)"
+    )
     while True:
         tick(github, devin)
         time.sleep(poll_seconds)

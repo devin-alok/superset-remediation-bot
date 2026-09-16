@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,7 +15,9 @@ ISSUE = {
     "body": "Log the exception.",
     "html_url": "https://github.com/devin-alok/superset/issues/14",
 }
-STARTED = "Devin session started: https://app.devin.ai/sessions/abc"
+STARTED = "Devin session started (attempt 1/3): https://app.devin.ai/sessions/abc"
+RUNNING = {"status": "running", "status_detail": "working", "created_at": time.time()}
+STALE = {"status": "running", "status_detail": "working", "created_at": time.time() - 26 * 60}
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +56,7 @@ class FakeDevin:
         self.session = session
         self.created: dict[str, Any] | None = None
         self.polled: list[str] = []
+        self.terminated: list[str] = []
 
     def create_session(self, prompt: str, title: str) -> dict[str, Any]:
         self.created = {"prompt": prompt, "title": title}
@@ -62,6 +66,9 @@ class FakeDevin:
         self.polled.append(session_id)
         assert self.session is not None
         return self.session
+
+    def terminate_session(self, session_id: str) -> None:
+        self.terminated.append(session_id)
 
 
 def test_build_prompt_contains_issue_and_pr_contract() -> None:
@@ -84,14 +91,38 @@ def test_tick_starts_session_for_labelled_issue() -> None:
 
 def test_tick_leaves_running_session_alone() -> None:
     github = FakeGitHub("devin:in-progress", [STARTED])
-    devin = FakeDevin({"status": "running", "status_detail": "working"})
+    devin = FakeDevin(RUNNING)
 
     remediate.tick(github, devin)
 
     assert devin.polled == ["devin-abc"]
-    assert devin.created is None
+    assert devin.created is None and devin.terminated == []
     assert github.label == "devin:in-progress"
     assert github.posted == [STARTED]
+
+
+def test_tick_terminates_stale_session_and_retries() -> None:
+    github = FakeGitHub("devin:in-progress", [STARTED])
+    devin = FakeDevin(STALE)
+
+    remediate.tick(github, devin)
+
+    assert devin.terminated == ["devin-abc"]
+    assert devin.created is not None
+    assert github.label == "devin:in-progress"
+    assert github.posted[1].startswith("Devin session started (attempt 2/3): ")
+
+
+def test_tick_gives_up_after_max_attempts() -> None:
+    github = FakeGitHub("devin:in-progress", [STARTED, STARTED, STARTED])
+    devin = FakeDevin(STALE)
+
+    remediate.tick(github, devin)
+
+    assert devin.terminated == ["devin-abc"]
+    assert devin.created is None
+    assert github.label == "devin:blocked"
+    assert "gave up after 3 attempts" in github.posted[-1]
 
 
 def test_tick_comments_pr_and_labels_pr_open_when_finished() -> None:
@@ -173,11 +204,40 @@ def test_report_counts_and_time_to_pr() -> None:
     assert "<table>" in report.render(data)
 
 
-def test_session_url_of_uses_latest_started_comment() -> None:
+def test_started_sessions_reads_all_attempts_in_order() -> None:
     comments = [
         "Devin session started: https://x/1",
         "unrelated",
-        "Devin session started: https://x/2 ",
+        "Devin session started (attempt 2/3): https://x/2",
     ]
-    assert remediate.session_url_of(comments) == "https://x/2"
-    assert remediate.session_url_of(["unrelated"]) is None
+    assert remediate.started_sessions(comments) == ["https://x/1", "https://x/2"]
+    assert remediate.started_sessions(["unrelated"]) == []
+
+
+def test_tick_respects_max_concurrent(monkeypatch: Any) -> None:
+    monkeypatch.setattr(remediate, "MAX_CONCURRENT", 0)
+    github, devin = FakeGitHub("devin:remediate"), FakeDevin()
+
+    remediate.tick(github, devin)
+
+    assert devin.created is None
+    assert github.label == "devin:remediate"
+
+
+def test_tick_continues_after_one_issue_fails(capsys: Any) -> None:
+    class BrokenGitHub(FakeGitHub):
+        def list_issues(self, label: str, state: str = "open") -> list[dict[str, Any]]:
+            return [dict(ISSUE, number=99), ISSUE] if label == self.label else []
+
+        def relabel(self, number: int, old: str, new: str) -> None:
+            if number == 99:
+                raise RuntimeError("boom")
+            super().relabel(number, old, new)
+
+    github, devin = BrokenGitHub("devin:remediate"), FakeDevin()
+
+    remediate.tick(github, devin)
+
+    assert "#99 start failed: boom" in capsys.readouterr().err
+    assert devin.created is not None
+    assert github.label == "devin:in-progress"
