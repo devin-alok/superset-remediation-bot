@@ -7,6 +7,7 @@ Every POLL_SECONDS the bot runs one stateless `tick`:
                         the result and label devin:pr-open | devin:blocked
 
 Labels and comments are the only state, so the process can be restarted at any time.
+After each tick the pipeline metrics are logged and `report.html` is regenerated.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import sys
 import time
 from typing import Any
 
+import report
 from devin_api import Devin, DevinAPI, outcome_of, pr_url_of
 from github_api import GitHub, GitHubAPI
 
@@ -102,6 +104,9 @@ def tick(github: GitHubAPI, devin: DevinAPI) -> None:
         check(issue, github, devin)
     for issue in github.list_issues(LABEL_TRIGGER):
         start(issue, github, devin)
+    path, data = report.write(github)
+    print(report.metrics_line(data))
+    print(f"report written to file://{path}")
 
 
 def main() -> int:

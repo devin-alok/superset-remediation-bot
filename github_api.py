@@ -12,7 +12,8 @@ GITHUB_API = "https://api.github.com"
 class GitHubAPI(Protocol):
     repo: str
 
-    def list_issues(self, label: str) -> list[dict[str, Any]]: ...
+    def list_issues(self, label: str, state: str = "open") -> list[dict[str, Any]]: ...
+    def events(self, number: int) -> list[dict[str, Any]]: ...
     def comments(self, number: int) -> list[str]: ...
     def comment(self, number: int, body: str) -> None: ...
     def relabel(self, number: int, old: str, new: str) -> None: ...
@@ -25,14 +26,23 @@ class GitHub:
         self.http.headers["Authorization"] = f"Bearer {token}"
         self.http.headers["Accept"] = "application/vnd.github+json"
 
-    def list_issues(self, label: str) -> list[dict[str, Any]]:
+    def list_issues(self, label: str, state: str = "open") -> list[dict[str, Any]]:
         response = self.http.get(
             f"{GITHUB_API}/repos/{self.repo}/issues",
-            params={"labels": label, "state": "open", "per_page": "100"},
+            params={"labels": label, "state": state, "per_page": "100"},
             timeout=30,
         )
         response.raise_for_status()
         return [issue for issue in response.json() if "pull_request" not in issue]
+
+    def events(self, number: int) -> list[dict[str, Any]]:
+        response = self.http.get(
+            f"{GITHUB_API}/repos/{self.repo}/issues/{number}/events",
+            params={"per_page": "100"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return list(response.json())
 
     def comments(self, number: int) -> list[str]:
         response = self.http.get(
