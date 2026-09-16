@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 import remediate
+import report
 
 ISSUE = {
     "number": 14,
@@ -16,6 +20,13 @@ RUNNING = {"status": "running", "status_detail": "working", "created_at": time.t
 STALE = {"status": "running", "status_detail": "working", "created_at": time.time() - 26 * 60}
 
 
+@pytest.fixture(autouse=True)
+def report_path(tmp_path: Any, monkeypatch: Any) -> Any:
+    path = tmp_path / "report.html"
+    monkeypatch.setenv("REPORT_PATH", str(path))
+    return path
+
+
 class FakeGitHub:
     repo = "devin-alok/superset"
 
@@ -23,8 +34,11 @@ class FakeGitHub:
         self.label = label
         self.posted = posted or []
 
-    def list_issues(self, label: str) -> list[dict[str, Any]]:
-        return [ISSUE] if label == self.label else []
+    def list_issues(self, label: str, state: str = "open") -> list[dict[str, Any]]:
+        return [{**ISSUE, "labels": [{"name": self.label}]}] if label == self.label else []
+
+    def events(self, number: int) -> list[dict[str, Any]]:
+        return []
 
     def comments(self, number: int) -> list[str]:
         return self.posted
@@ -151,6 +165,45 @@ def test_tick_requeues_in_progress_issue_without_session_comment() -> None:
     assert github.posted == [STARTED]
 
 
+def test_tick_writes_report(report_path: Any) -> None:
+    remediate.tick(FakeGitHub("devin:pr-open"), FakeDevin())
+
+    page = report_path.read_text()
+    assert "cleanup swallows exceptions" in page
+    assert "successful (PR open)" in page
+
+
+def labeled(name: str, at: str) -> dict[str, Any]:
+    return {"event": "labeled", "label": {"name": name}, "created_at": at}
+
+
+def test_report_counts_and_time_to_pr() -> None:
+    class Repo(FakeGitHub):
+        def list_issues(self, label: str, state: str = "open") -> list[dict[str, Any]]:
+            assert state == "all"
+            issues = {
+                "devin:pr-open": [{**ISSUE, "number": 1, "labels": [{"name": label}]}],
+                "devin:blocked": [{**ISSUE, "number": 2, "labels": [{"name": label}]}],
+                "devin:in-progress": [{**ISSUE, "number": 3, "labels": [{"name": label}]}],
+            }
+            return issues.get(label, [])
+
+        def events(self, number: int) -> list[dict[str, Any]]:
+            start = labeled("devin:in-progress", "2026-01-01T10:00:00Z")
+            end = {1: "devin:pr-open", 2: "devin:blocked"}.get(number)
+            return [start] + ([labeled(end, "2026-01-01T10:12:00Z")] if end else [])
+
+    now = datetime(2026, 1, 1, 10, 30, tzinfo=UTC)
+    data = report.collect(Repo("devin:pr-open"), now)
+
+    assert data["counts"] == {"queued": 0, "in progress": 1, "pr open": 1, "blocked": 1}
+    assert data["success_rate"] == 50
+    assert data["timing"]["median"] == 12
+    assert [row["minutes"] for row in data["rows"]] == [12, 12, 30]
+    assert '"pr open": 1' in report.metrics_line(data)
+    assert "<table>" in report.render(data)
+
+
 def test_started_sessions_reads_all_attempts_in_order() -> None:
     comments = [
         "Devin session started: https://x/1",
@@ -173,7 +226,7 @@ def test_tick_respects_max_concurrent(monkeypatch: Any) -> None:
 
 def test_tick_continues_after_one_issue_fails(capsys: Any) -> None:
     class BrokenGitHub(FakeGitHub):
-        def list_issues(self, label: str) -> list[dict[str, Any]]:
+        def list_issues(self, label: str, state: str = "open") -> list[dict[str, Any]]:
             return [dict(ISSUE, number=99), ISSUE] if label == self.label else []
 
         def relabel(self, number: int, old: str, new: str) -> None:
