@@ -25,10 +25,15 @@ so there is no database and the container can be restarted at any time.
 ## Run
 
 ```bash
+git clone https://github.com/devin-alok/superset-remediation-bot.git
+cd superset-remediation-bot
 cp .env.example .env          # fill in GITHUB_TOKEN, DEVIN_ORG_ID, DEVIN_API_KEY
 docker build -t remediation-bot .
-docker run --rm --env-file .env remediation-bot
+docker run --rm --env-file .env remediation-bot   # Ctrl-C to stop; run only one instance at a time
 ```
+
+The log prints one line per event (`#26 attempt 1 session <url>`, `#26 finished  pr <url>`);
+everything else is visible on the issue itself as comments and labels.
 
 To remediate a single issue, label it `devin:remediate`. A session still working after
 `SESSION_TIMEOUT_MINUTES` (default 25) is terminated and a fresh one started, up to
