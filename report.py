@@ -169,11 +169,19 @@ def write(github: GitHubAPI, path: str | None = None) -> tuple[str, dict[str, An
     return os.path.abspath(path), data
 
 
+def url(path: str) -> str:
+    """file:// URL of the report; HOST_REPORT_DIR maps a container path to the host."""
+    host_dir = os.environ.get("HOST_REPORT_DIR")
+    if host_dir:
+        path = os.path.join(host_dir, os.path.basename(path))
+    return f"file://{path}"
+
+
 def main() -> int:
     github = GitHub(os.environ["GITHUB_REPO"], os.environ["GITHUB_TOKEN"])
     path, data = write(github)
     print(metrics_line(data))
-    print(f"report written to file://{path}")
+    print(f"report written to {url(path)}")
     return 0
 
 
